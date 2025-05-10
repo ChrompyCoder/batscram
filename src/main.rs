@@ -1,77 +1,47 @@
-use reqwest::blocking::get;
 use regex::Regex;
-use scraper::{Html, Selector}; // Add Selector import
+use reqwest::blocking::Client;
 use std::collections::HashSet;
-use std::env;
-use std::error::Error;
-use std::io;
-fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = env::args().collect();
+use std::io::{self, Write};
+use url::form_urlencoded;
 
-    if args.len() != 2 {
-        eprintln!("Usage: cargo run <url>");
-        eprintln!("Example: cargo run https://www.rust-lang.org");
-        return Ok(()); // Exit gracefully
-    }
-    let url = &args[1];
-    println!("Scraping: {}", url);
+const STANDARD_EMAIL_REGEX: &str = r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#;
 
-    let html_content = match fetch_html(url) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Error fetching URL {}: {}", url, e);
-            eprintln!("Provide complete link with http/https header");
-            return Err(Box::new(e)); // Return the specific error
-        }
-    };
-
-    let (phone_numbers, emails) = match scrape_contact_info(&html_content) {
-        Ok((phones, emails)) => (phones, emails),
-        Err(e) => {
-            eprintln!("Error scraping contact info: {}", e);
-            return Err(e); // Return the specific error
-        }
-    };
-
-
-    println!("\n--- Contact Information Found ---");
-
-    if phone_numbers.is_empty() {
-        println!("No unique phone numbers discovered.");
-    } else {
-        println!("Unique Phone Numbers:");
-        for number in phone_numbers {
-            println!("- {}", number);
-        }
-    }
-
-    println!(); // Add a blank line
-
-    if emails.is_empty() {
-        println!("No unique email addresses discovered.");
-    } else {
-        println!("Unique Email Addresses:");
-        for email in emails {
-            println!("- {}", email);
-        }
-    }
-
-    Ok(())
+fn get_user_input(prompt: &str) -> io::Result<String> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
 
-/// Retrieves the HTML content from the specified URL.
-fn fetch_html(url: &str) -> Result<String, reqwest::Error> {
-    // if !url.starts_with("http://") && !url.starts_with("https://") {
-    //     // This is not a reqwest::Error, so we need to handle it differently
-    //     // or return a custom error type if more sophisticated error handling is needed.
-    //     // For simplicity here, we'll let reqwest handle potential malformed URLs
-    //     // when `get` is called, or rely on the pattern match above.
-    // }
-    let response = get(url)?;
-    response.text()
+fn fetch_website_content(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    println!("Fetching content...");
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .build()?;
+    let response = client.get(url).send()?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch URL: {}", response.status()).into());
+    }
+    let body = response.text()?;
+    Ok(body)
 }
+
+fn extract_details(content: &str, regex_pattern: &str) -> HashSet<String> {
+    let re = match Regex::new(regex_pattern) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Invalid regex pattern '{}': {}", regex_pattern, e);
+            return HashSet::new();
+        }
+    };
+    re.find_iter(content)
+        .map(|mat| mat.as_str().to_string())
+        .collect()
+}
+
 fn is_date(input: &str) -> bool {
-    // Check if the input is a date in the format dd-mm-yyyy
     let parts: Vec<&str> = input.split('-').collect();
     if parts.len() == 3 {
         if let (Ok(day), Ok(month), Ok(year)) = (
@@ -85,35 +55,33 @@ fn is_date(input: &str) -> bool {
     false
 }
 
-/// Extracts phone numbers and email addresses from HTML content.
-fn scrape_contact_info(html_content: &str) -> Result<(Vec<String>, Vec<String>), Box<dyn Error>> {
-    // This regex attempts to capture common patterns 
-    // You might need to adjust this based on the specific formats you expect.
-    println!("Enter phone number Regex <To use default, press Enter>: ");
+fn main() -> Result<(), Box<dyn std::error::Error>> {    
+    let website_url = get_user_input("Enter the website URL to scrape: ")?;
+    if website_url.is_empty() {
+        eprintln!("No URL provided. Exiting.");
+        return Ok(());
+    }
 
-    let mut phone_regex_input = String::new();
-    io::stdin().read_line(&mut phone_regex_input)
-        .expect("Failed to read line");
+    let mut phone_regex_str = get_user_input(
+        "Enter the regex for phone numbers (e.g., \\d{3}-\\d{3}-\\d{4}): ",
+    )?;
+    if phone_regex_str.is_empty() {
+        phone_regex_str = r"(?:\+?\d{1,4}[-.\s]?)?$?\d{1,4}$?[-.\s]?\d{1,4}[-.\s]?\d{1,9}".to_string();
+    }
 
-    let phone_regex = if phone_regex_input.trim().is_empty() {
-        Regex::new(r"(?:\+?\d{1,4}[-.\s]?)?$?\d{1,4}$?[-.\s]?\d{1,4}[-.\s]?\d{1,9}")
-            .expect("Phone Regex Dead")
-    } else {
-        Regex::new(&phone_regex_input.trim())
-            .expect("Bad Phone Regex")
+    let html_content = match fetch_website_content(&website_url) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Error fetching website content: {}", e);
+            return Ok(());
+        }
     };
-    let email_regex = Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")?;
 
-    let mut phone_numbers: HashSet<String> = HashSet::new();
-    let mut email_addresses: HashSet<String> = HashSet::new();
-
-    for mat in phone_regex.find_iter(html_content) {
-        phone_numbers.insert(mat.as_str().to_string());
+    let mut phone_numbers = HashSet::new();
+    if !phone_regex_str.is_empty() {
+        println!("\nExtracting phone numbers using regex: {}", phone_regex_str);
+        phone_numbers = extract_details(&html_content, &phone_regex_str);
     }
-    for mat in email_regex.find_iter(html_content) {
-        email_addresses.insert(mat.as_str().to_string());
-    }
-
     phone_numbers.retain(|number| {
         !number.contains(".") 
         && number.len() >= 10
@@ -122,13 +90,74 @@ fn scrape_contact_info(html_content: &str) -> Result<(Vec<String>, Vec<String>),
         
     });
 
+    println!("\nExtracting emails using regex: {}", STANDARD_EMAIL_REGEX);
+    let emails = extract_details(&html_content, STANDARD_EMAIL_REGEX);
 
-    let mut sorted_phones: Vec<String> = phone_numbers.into_iter().collect();
-    sorted_phones.sort();
+    println!("\nFound {} unique phone number(s):", phone_numbers.len());
+    if phone_numbers.is_empty() {
+        println!("No phone numbers found.");
+    } 
+    else {
+        for phone in &phone_numbers {
+            println!("- {}", phone);
+        }
+    }
 
-    let mut sorted_emails: Vec<String> = email_addresses.into_iter().collect();
-    sorted_emails.sort();
+    println!("Found {} unique email(s):", emails.len());
+    if emails.is_empty() {
+        println!("No emails found.");
+    } 
+    else {
+        for email in &emails {
+            println!("- {}", email);
+        }
+    }
 
+    if !phone_numbers.is_empty() {
+        println!("\n--- WhatsApp Message Generation ---");
+        println!("Note: The Phone Numbers will be trimed to 10 digits to generate the link.");
+        let send_messages_choice =
+            get_user_input("Do you want to generate WhatsApp message links? (y/n): ")?
+                .to_lowercase();
 
-    Ok((sorted_phones, sorted_emails))
+        if send_messages_choice == "yes" || send_messages_choice == "y" {
+            let mut custom_message = get_user_input("Enter your custom message: ")?;
+            if custom_message.is_empty() {
+                println!("No message provided. Default message used:\nHi, Batscram needs your help.");
+                custom_message="Hi, Batscram needs your help".to_string();
+            }
+            println!("\nMake sure you have logged in.\nGenerated Links (ctrl+click to open in WhatsApp):");
+            let encoded_message: String = form_urlencoded::byte_serialize(custom_message.as_bytes()).collect();
+
+            for phone in &phone_numbers {
+                    // This part might require adjustment based on how your regex captures numbers.
+                let cleaned_phone: String = phone
+                    .chars()
+                    .filter(|c| c.is_digit(10))
+                    .rev()
+                    .take(10)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+
+                if !cleaned_phone.is_empty() {
+                         // IMPORTANT: You might need to prepend country codes if not captured by regex
+                         // and ensure the number format is valid for wa.me links.
+                         // For example, if your regex captures "123-456-7890" for US, you might need "11234567890".
+                    println!("WhatsApp message link for {}: https://wa.me/{}?text={}", cleaned_phone, cleaned_phone, encoded_message);
+                } 
+                else {
+                   println!("Could not generate link for '{}' (no digits found after cleaning)", phone);
+                }
+            }
+            println!("\nVerify the numbers before sending.");
+        }
+        else {
+            println!("Skipping message link generation.");
+        }
+    }
+
+    println!("\nBEEP...\nEND.");
+    Ok(())
 }
